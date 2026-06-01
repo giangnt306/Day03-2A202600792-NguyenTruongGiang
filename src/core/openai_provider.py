@@ -1,7 +1,13 @@
+import os
 import time
 from typing import Dict, Any, Optional, Generator
 from openai import OpenAI
 from src.core.llm_provider import LLMProvider
+# from dotenv import load_dotenv
+
+# load_dotenv()
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 
 class OpenAIProvider(LLMProvider):
     def __init__(self, model_name: str = "gpt-4o", api_key: Optional[str] = None):
@@ -19,6 +25,8 @@ class OpenAIProvider(LLMProvider):
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=messages,
+            stop=["Observation:", "observation:", "\nObservation:", "\nobservation:"],
+            temperature=0.0
         )
 
         end_time = time.time()
