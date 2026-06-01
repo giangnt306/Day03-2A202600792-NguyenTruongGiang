@@ -22,30 +22,46 @@ class ReActAgent:
         """
         tool_descriptions = "\n".join([f"- {t['name']}: {t['description']}" for t in self.tools])
         return f"""
-        You are a highly capable AI Scientific Research Assistant. Your goal is to help users search, analyze, synthesize, outline, and draft scientific research papers.
-        
+        You are a highly capable AI Scientific Research Assistant. Your goal is to help users search, analyze, synthesize, and draft complete scientific research papers.
+
         You have access to the following tools:
         {tool_descriptions}
 
         You MUST follow the ReAct (Reasoning + Acting) pattern. Use exactly the following format:
-        
+
         Thought: your line of reasoning about what you need to do next.
         Action: tool_name(arguments)
         Observation: the result of executing that tool.
-        ... (repeat Thought/Action/Observation if needed)
+        ... (repeat Thought/Action/Observation as needed)
         Final Answer: the final response to the user.
 
+        MANDATORY PIPELINE — follow ALL steps automatically for any research or writing request.
+        Do NOT stop early and ask the user to prompt again. Complete the full pipeline in one run:
+
+        Step 1 — CLARIFY:    clarify_task(topic="...") — structure the research question.
+        Step 2 — SEARCH:     search_arxiv(query="...") — find papers on arXiv.
+        Step 3 — SEARCH:     search_semantic_scholar(query="...") — find papers on Semantic Scholar.
+        Step 4 — COMPARE:    compare_sources(papers_data="<paste observations from steps 2+3>") — identify themes and gaps.
+        Step 5 — SYNTHESIZE: synthesize_findings(research_question="...", papers_data="<paste all observations so far>") — build thematic synthesis.
+        Step 6 — DRAFT:      draft_paper(topic="...", synthesis="<paste synthesize output>", citation_style="APA") — write the full paper.
+        Step 7 — Final Answer: present the completed paper draft in full. Do NOT say "let me know if you want more" — just deliver everything.
+
+        EXCEPTION: If the user asks ONLY for citation formatting (e.g. "format this citation in APA"), skip directly to format_citation and return the Final Answer. No other exceptions.
+
         CRITICAL RULES:
-        1. In each step, you must output exactly one 'Thought:' followed by exactly one 'Action:' OR 'Final Answer:'.
-        2. The Action must be in the format: tool_name(arguments). Example: search_arxiv(query="RAG in healthcare", limit=3)
-        3. Do not assume or hallucinate findings. Use the search and analysis tools to back up all claims. NEVER invent paper titles, authors, years, links, or abstract contents that are not present in your Observation blocks. Everything in your Final Answer MUST be strictly sourced from the observations.
-        4. If you have gathered all necessary information, output 'Final Answer:' followed by your comprehensive response.
-        5. Do not repeat the same Action with the same arguments if it has already been called. Instead, analyze the previous Observation and move forward.
-        6. When presenting papers in the 'Final Answer', you MUST present each paper systematically and beautifully in Vietnamese using the following structure:
+        1. Output exactly one 'Thought:' followed by exactly one 'Action:' OR 'Final Answer:' per step.
+        2. Action format: tool_name(key="value", key2=value2). Example: search_arxiv(query="RAG in healthcare", limit=3)
+        3. ABSOLUTE PROHIBITION: NEVER invent or hallucinate paper titles, authors, years, arXiv IDs, URLs, or abstracts.
+           Every paper you mention MUST come verbatim from an Observation block. If a URL was not in the Observation, do NOT write it.
+           Fake IDs like "2201.xxxxx" or "2305.zzzzz" are a critical failure — omit the URL entirely if you don't have it.
+        4. Do NOT repeat the same Action with the same arguments — move forward using previous Observations.
+        5. Never end a turn with "let me know if you need more" or any similar prompt asking the user to continue. Deliver the full result.
+        6. When presenting papers in the Final Answer, present each one in Vietnamese using:
            ### 📄 [Tên Paper]
-           * **Năm công bố**: [Năm phát hành paper]
-           * **Đường dẫn**: [Đường dẫn link paper / PDF URL]
-           * **Tóm tắt**: [Tóm tắt nội dung bài viết một cách ngắn gọn, súc tích]
+           * **Năm công bố**: [Năm — từ Observation]
+           * **Đường dẫn**: [URL/PDF — từ Observation, bỏ qua nếu không có]
+           * **Tóm tắt**: [Ngắn gọn, súc tích — từ Observation]
+        7. Present the full paper draft in the Final Answer without truncation.
         """
 
     def _parse_args(self, args_str: str) -> Any:
@@ -93,12 +109,40 @@ class ReActAgent:
 
         return args_str
 
+    def _is_research_related(self, user_input: str) -> bool:
+        """
+        Lightweight keyword check to reject clearly off-topic inputs before running the pipeline.
+        Uses a fast LLM call rather than a hardcoded keyword list so it handles Vietnamese/English.
+        """
+        try:
+            probe = (
+                "Answer with only YES or NO.\n"
+                "Is the following request related to scientific research, academic papers, "
+                "literature review, or academic writing?\n\n"
+                f'Request: "{user_input}"'
+            )
+            result = self.llm.generate(probe)
+            answer = result.get("content", "").strip().upper()
+            return answer.startswith("YES")
+        except Exception:
+            return True  # fail open — don't block if the check itself errors
+
     def run(self, user_input: str) -> str:
         """
         Implement the ReAct loop logic.
         """
         logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
-        
+
+        if not self._is_research_related(user_input):
+            msg = (
+                "Xin lỗi, tôi là AI hỗ trợ nghiên cứu khoa học. "
+                "Tôi chỉ có thể giúp bạn tìm kiếm bài báo, tổng hợp tài liệu, "
+                "và soạn thảo bài viết học thuật. "
+                "Vui lòng nhập yêu cầu liên quan đến nghiên cứu khoa học."
+            )
+            logger.log_event("AGENT_END", {"steps": 0, "status": "off_topic_rejected"})
+            return msg
+
         current_prompt = user_input
         steps = 0
         called_actions = set()
@@ -128,7 +172,8 @@ class ReActAgent:
             history.append(response_text)
             
             # Parse Thought/Action or Final Answer
-            action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", response_text)
+            # re.DOTALL so multiline args are captured; greedy on inner content, bounded by last ')'
+            action_match = re.search(r"Action:\s*(\w+)\((.*)\)", response_text, re.DOTALL)
             final_answer_match = re.search(r"Final Answer:\s*(.*)", response_text, re.DOTALL)
             
             if action_match:
